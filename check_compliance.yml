@@ -6,20 +6,28 @@
   tasks:
 
     # =======================================
-    # 1. Ubuntu / Debian Remediation
+    # 1. Ubuntu / Debian Remediation (Shell Method)
     # =======================================
-    - name: Enable UFW (Ubuntu/Debian)
-      ufw:
-        state: enabled
-        policy: allow         # Sets default to 'allow' to prevent locking yourself out
-      when: ansible_os_family == 'Debian'
-      register: ufw_fix
-
-    - name: Verify UFW Status (Ubuntu)
+    - name: Check UFW Status (Ubuntu)
       command: ufw status
-      register: ufw_final
+      register: ufw_check
       changed_when: false
+      ignore_errors: yes
       when: ansible_os_family == 'Debian'
+
+    - name: Enable UFW (Force Enable)
+      command: ufw --force enable
+      when: 
+        - ansible_os_family == 'Debian'
+        - "'Status: active' not in ufw_check.stdout"
+      register: ufw_action
+
+    - name: Report UFW Enabled
+      debug:
+        msg: "COMPLIANCE FIXED: UFW Firewall was inactive and has been ENABLED."
+      when: 
+        - ansible_os_family == 'Debian'
+        - ufw_action.changed
 
     # =======================================
     # 2. RedHat / CentOS Remediation
@@ -34,13 +42,6 @@
     # =======================================
     # 3. Windows Remediation
     # =======================================
-    - name: Enable Windows Firewall (Domain/Public/Private)
+    - name: Enable Windows Firewall
       win_shell: Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
       when: ansible_os_family == 'Windows'
-
-    # =======================================
-    # 4. Final Reporting
-    # =======================================
-    - name: Report Remediation Success
-      debug:
-        msg: "COMPLIANCE FIXED: Firewall is now ENABLED and ACTIVE on {{ inventory_hostname }}"
