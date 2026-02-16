@@ -1,6 +1,7 @@
 ---
 - name: Security Compliance Check (Firewall Status)
   hosts: all
+  become: yes                 # <--- CRITICAL: Runs commands as root (sudo)
   gather_facts: yes
   tasks:
 
@@ -14,13 +15,15 @@
       ignore_errors: yes
       when: ansible_os_family == 'Debian'
 
+    # If UFW is inactive (or disabled), fail the compliance check
     - name: Fail if UFW is inactive
       fail:
-        msg: "COMPLIANCE FAILED: UFW (Firewall) is inactive or not installed on {{ inventory_hostname }}"
+        msg: "COMPLIANCE FAILED: UFW (Firewall) is inactive on {{ inventory_hostname }}"
       when: 
         - ansible_os_family == 'Debian'
         - "'Status: active' not in ufw_result.stdout"
 
+    # If UFW is active, pass the check
     - name: Pass if UFW is active
       debug:
         msg: "COMPLIANCE PASSED: UFW is ACTIVE on {{ inventory_hostname }}"
