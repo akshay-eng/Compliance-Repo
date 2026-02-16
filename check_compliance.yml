@@ -1,0 +1,33 @@
+---
+- name: Security Compliance Check (Firewall Status)
+  hosts: all
+  gather_facts: yes
+  tasks:
+
+    # --- Linux Check ---
+    - name: Check Firewalld Status (Linux)
+      command: firewall-cmd --state
+      register: linux_firewall
+      ignore_errors: yes
+      when: ansible_system == 'Linux'
+
+    - name: Fail if Linux Firewall is down
+      fail:
+        msg: "COMPLIANCE FAILED: Firewalld is inactive on {{ inventory_hostname }}"
+      when: ansible_system == 'Linux' and linux_firewall.rc != 0
+
+    # --- Windows Check ---
+    - name: Check Windows Firewall (Windows)
+      win_shell: Get-NetFirewallProfile -Profile Domain | Select-Object -ExpandProperty Enabled
+      register: win_firewall
+      when: ansible_os_family == 'Windows'
+
+    - name: Fail if Windows Firewall is down
+      fail:
+        msg: "COMPLIANCE FAILED: Domain Firewall is inactive on {{ inventory_hostname }}"
+      when: ansible_os_family == 'Windows' and 'True' not in win_firewall.stdout
+
+    # --- Success Message ---
+    - name: Report Success
+      debug:
+        msg: "COMPLIANCE PASSED: Firewall is active on {{ inventory_hostname }}"
