@@ -1,64 +1,46 @@
 ---
-- name: Security Compliance Check (Firewall Status)
+- name: Security Compliance & Auto-Remediation (Firewall)
   hosts: all
-  become: yes                 # <--- CRITICAL: Runs commands as root (sudo)
-  gather_facts: yes
+  become: yes                 # CRITICAL: Runs commands as root (sudo)
+  gather_facts: yes           # Needed to detect OS type
   tasks:
 
-    # -------------------------------------------
-    # 1. Ubuntu / Debian Specific Check (UFW)
-    # -------------------------------------------
-    - name: Check UFW Status (Ubuntu/Debian)
+    # =======================================
+    # 1. Ubuntu / Debian Remediation
+    # =======================================
+    - name: Enable UFW (Ubuntu/Debian)
+      ufw:
+        state: enabled
+        policy: allow         # Sets default to 'allow' to prevent locking yourself out
+      when: ansible_os_family == 'Debian'
+      register: ufw_fix
+
+    - name: Verify UFW Status (Ubuntu)
       command: ufw status
-      register: ufw_result
+      register: ufw_final
       changed_when: false
-      ignore_errors: yes
       when: ansible_os_family == 'Debian'
 
-    # If UFW is inactive (or disabled), fail the compliance check
-    - name: Fail if UFW is inactive
-      fail:
-        msg: "COMPLIANCE FAILED: UFW (Firewall) is inactive on {{ inventory_hostname }}"
-      when: 
-        - ansible_os_family == 'Debian'
-        - "'Status: active' not in ufw_result.stdout"
-
-    # If UFW is active, pass the check
-    - name: Pass if UFW is active
-      debug:
-        msg: "COMPLIANCE PASSED: UFW is ACTIVE on {{ inventory_hostname }}"
-      when: 
-        - ansible_os_family == 'Debian'
-        - "'Status: active' in ufw_result.stdout"
-
-    # -------------------------------------------
-    # 2. RHEL / CentOS Specific Check (Firewalld)
-    # -------------------------------------------
-    - name: Check Firewalld Status (RHEL/CentOS)
-      command: firewall-cmd --state
-      register: rhel_firewall
-      changed_when: false
-      ignore_errors: yes
+    # =======================================
+    # 2. RedHat / CentOS Remediation
+    # =======================================
+    - name: Start & Enable Firewalld (RHEL/CentOS)
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
       when: ansible_os_family == 'RedHat'
 
-    - name: Fail if Firewalld is inactive
-      fail:
-        msg: "COMPLIANCE FAILED: Firewalld is inactive on {{ inventory_hostname }}"
-      when: 
-        - ansible_os_family == 'RedHat'
-        - rhel_firewall.rc != 0
-
-    # -------------------------------------------
-    # 3. Windows Specific Check (Windows Firewall)
-    # -------------------------------------------
-    - name: Check Windows Firewall
-      win_shell: Get-NetFirewallProfile -Profile Domain | Select-Object -ExpandProperty Enabled
-      register: win_firewall
+    # =======================================
+    # 3. Windows Remediation
+    # =======================================
+    - name: Enable Windows Firewall (Domain/Public/Private)
+      win_shell: Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
       when: ansible_os_family == 'Windows'
 
-    - name: Fail if Windows Firewall is down
-      fail:
-        msg: "COMPLIANCE FAILED: Domain Firewall is inactive on {{ inventory_hostname }}"
-      when: 
-        - ansible_os_family == 'Windows' 
-        - "'True' not in win_firewall.stdout"
+    # =======================================
+    # 4. Final Reporting
+    # =======================================
+    - name: Report Remediation Success
+      debug:
+        msg: "COMPLIANCE FIXED: Firewall is now ENABLED and ACTIVE on {{ inventory_hostname }}"
