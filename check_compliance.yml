@@ -4,20 +4,51 @@
   gather_facts: yes
   tasks:
 
-    # --- Linux Check ---
-    - name: Check Firewalld Status (Linux)
-      command: firewall-cmd --state
-      register: linux_firewall
+    # -------------------------------------------
+    # 1. Ubuntu / Debian Specific Check (UFW)
+    # -------------------------------------------
+    - name: Check UFW Status (Ubuntu/Debian)
+      command: ufw status
+      register: ufw_result
+      changed_when: false
       ignore_errors: yes
-      when: ansible_system == 'Linux'
+      when: ansible_os_family == 'Debian'
 
-    - name: Fail if Linux Firewall is down
+    - name: Fail if UFW is inactive
+      fail:
+        msg: "COMPLIANCE FAILED: UFW (Firewall) is inactive or not installed on {{ inventory_hostname }}"
+      when: 
+        - ansible_os_family == 'Debian'
+        - "'Status: active' not in ufw_result.stdout"
+
+    - name: Pass if UFW is active
+      debug:
+        msg: "COMPLIANCE PASSED: UFW is ACTIVE on {{ inventory_hostname }}"
+      when: 
+        - ansible_os_family == 'Debian'
+        - "'Status: active' in ufw_result.stdout"
+
+    # -------------------------------------------
+    # 2. RHEL / CentOS Specific Check (Firewalld)
+    # -------------------------------------------
+    - name: Check Firewalld Status (RHEL/CentOS)
+      command: firewall-cmd --state
+      register: rhel_firewall
+      changed_when: false
+      ignore_errors: yes
+      when: ansible_os_family == 'RedHat'
+
+    - name: Fail if Firewalld is inactive
       fail:
         msg: "COMPLIANCE FAILED: Firewalld is inactive on {{ inventory_hostname }}"
-      when: ansible_system == 'Linux' and linux_firewall.rc != 0
+      when: 
+        - ansible_os_family == 'RedHat'
+        - rhel_firewall.rc != 0
 
-    # --- Windows Check ---
-    - name: Check Windows Firewall (Windows)
+    # -------------------------------------------
+    # 3. Windows Specific Check (Windows Firewall)
+    # -------------------------------------------
+    - name: Check Windows Firewall
       win_shell: Get-NetFirewallProfile -Profile Domain | Select-Object -ExpandProperty Enabled
       register: win_firewall
       when: ansible_os_family == 'Windows'
@@ -25,9 +56,6 @@
     - name: Fail if Windows Firewall is down
       fail:
         msg: "COMPLIANCE FAILED: Domain Firewall is inactive on {{ inventory_hostname }}"
-      when: ansible_os_family == 'Windows' and 'True' not in win_firewall.stdout
-
-    # --- Success Message ---
-    - name: Report Success
-      debug:
-        msg: "COMPLIANCE PASSED: Firewall is active on {{ inventory_hostname }}"
+      when: 
+        - ansible_os_family == 'Windows' 
+        - "'True' not in win_firewall.stdout"
