@@ -1,0 +1,74 @@
+---
+- name: Remediate Bare Pod OOM (CrashLoopBackOff)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # These will be passed in from the AI Agent via AWX extra_vars
+    target_pod_name: ""
+    target_namespace: ""
+    new_memory_limit: "512Mi"
+
+  tasks:
+    - name: Fetch existing pod configuration
+      kubernetes.core.k8s_info:
+        kind: Pod
+        name: "{{ target_pod_name }}"
+        namespace: "{{ target_namespace }}"
+      register: pod_info
+
+    - name: Fail if pod does not exist
+      fail:
+        msg: "Pod {{ target_pod_name }} not found in {{ target_namespace }}."
+      when: pod_info.resources | length == 0
+
+    - name: Modify Pod Definition (Strip immutables and increase memory)
+      ansible.builtin.shell: |
+        python3 -c '
+        import json, sys
+        pod = json.loads(sys.argv[1])
+        
+        # 1. Clean immutable metadata
+        metadata = pod.get("metadata", {})
+        keys_to_remove = ["creationTimestamp", "resourceVersion", "uid", "managedFields", "ownerReferences"]
+        for k in keys_to_remove:
+            metadata.pop(k, None)
+        pod["metadata"] = metadata
+        
+        # 2. Clean status (prevents recreation conflicts)
+        pod.pop("status", None)
+        
+        # 3. Update memory limits for all containers
+        for container in pod.get("spec", {}).get("containers", []):
+            if "resources" not in container:
+                container["resources"] = {}
+            if "limits" not in container["resources"]:
+                container["resources"]["limits"] = {}
+            if "requests" not in container["resources"]:
+                container["resources"]["requests"] = {}
+                
+            container["resources"]["limits"]["memory"] = sys.argv[2]
+            container["resources"]["requests"]["memory"] = sys.argv[2]
+            
+        print(json.dumps(pod))
+        ' '{{ pod_info.resources[0] | to_json }}' '{{ new_memory_limit }}' > /tmp/patched_pod.json
+      register: python_script
+
+    - name: Delete the failing bare pod
+      kubernetes.core.k8s:
+        state: absent
+        kind: Pod
+        name: "{{ target_pod_name }}"
+        namespace: "{{ target_namespace }}"
+        wait: yes
+        wait_timeout: 60
+
+    - name: Recreate the pod with increased memory
+      kubernetes.core.k8s:
+        state: present
+        src: /tmp/patched_pod.json
+
+    - name: Clean up temp files
+      ansible.builtin.file:
+        path: /tmp/patched_pod.json
+        state: absent
