@@ -1,20 +1,23 @@
 ---
-- name: Remediate Bare Pod OOM via SSH and Kubectl
-  hosts: all  # In AWX, you will map this to your K8s Master Node inventory
-  become: yes # Optional: Change to 'no' if the SSH user already has kubectl permissions
+- name: Remediate Bare Pod OOM as Akshay
+  hosts: all
+  # This tells AWX: "Log in as root (via the credential), then switch to akshay"
+  become: yes
+  become_user: akshay
   gather_facts: false
   vars:
-    # These will be passed in from the AI Agent via AWX extra_vars
     target_pod_name: ""
     target_namespace: ""
     new_memory_limit: "512Mi"
-    # Update this if your kubectl config is in a different location for the SSH user
-    kubeconfig_path: "~/.kube/config" 
+    # Explicitly point to akshay's kubeconfig
+    kubeconfig_path: "/home/akshay/.kube/config"
 
   tasks:
     - name: Dump current pod configuration to JSON
       ansible.builtin.shell: |
         kubectl get pod {{ target_pod_name }} -n {{ target_namespace }} -o json > /tmp/{{ target_pod_name }}_original.json
+      args:
+        chdir: /home/akshay  # This acts like your 'cd /home/akshay'
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
 
@@ -51,16 +54,22 @@
         with open("/tmp/{{ target_pod_name }}_patched.json", "w") as f:
             json.dump(pod, f)
         ' '{{ new_memory_limit }}'
+      args:
+        chdir: /home/akshay
 
     - name: Force delete the failing bare pod
       ansible.builtin.shell: |
         kubectl delete pod {{ target_pod_name }} -n {{ target_namespace }} --grace-period=0 --force
+      args:
+        chdir: /home/akshay
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
 
     - name: Recreate the pod with increased memory
       ansible.builtin.shell: |
         kubectl create -f /tmp/{{ target_pod_name }}_patched.json
+      args:
+        chdir: /home/akshay
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
 
