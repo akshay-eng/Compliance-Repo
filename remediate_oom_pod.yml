@@ -1,67 +1,82 @@
 ---
-- name: Remediate Bare Pod OOM (High Reliability)
+- name: Remediate Bare Pod OOM (High Reliability SSH)
   hosts: all
+  # Logs in as root via your AWX credential, then switches to your user
   become: yes
-  # Log in as root, then switch to akshay
   become_user: akshay
   gather_facts: false
   vars:
     target_pod_name: "oom-test-pod"
     target_namespace: "demo"
-    new_memory_limit: "512Mi"
+    # Bumped to 1.5Gi to finally stabilize the tail /dev/zero process
+    new_memory_limit: "1536Mi" 
     kubeconfig_path: "/home/akshay/.kube/config"
 
   tasks:
-    - name: Ensure stale temp files are removed
+    - name: Cleanup stale JSON files
       ansible.builtin.file:
         path: "/tmp/{{ item }}"
         state: absent
       loop:
-        - "original_pod.json"
-        - "patched_pod.json"
+        - "raw_pod.json"
+        - "remediate_pod.json"
 
-    - name: Get current pod spec
+    - name: Fetch current pod spec from Kubernetes
       ansible.builtin.shell: |
-        kubectl get pod {{ target_pod_name }} -n {{ target_namespace }} -o json > /tmp/original_pod.json
+        kubectl get pod {{ target_pod_name }} -n {{ target_namespace }} -o json > /tmp/raw_pod.json
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
         PATH: "/usr/local/bin:/usr/bin:/bin:/home/akshay/bin"
 
-    - name: Patch JSON using Python3
+    - name: Patch Spec with Python (Ensures 1.5Gi limit is applied)
       ansible.builtin.shell: |
         python3 -c '
         import json, sys
-        with open("/tmp/original_pod.json", "r") as f:
-            data = json.load(f)
+        with open("/tmp/raw_pod.json", "r") as f:
+            pod = json.load(f)
         
-        # Strip internal K8s metadata
-        meta = data.get("metadata", {})
-        for key in ["uid", "resourceVersion", "creationTimestamp", "managedFields", "ownerReferences"]:
-            meta.pop(key, None)
-        data["metadata"] = meta
-        data.pop("status", None)
+        # 1. Strip all unique/immutable identifiers so we can recreate it
+        meta = pod.get("metadata", {})
+        for k in ["uid", "resourceVersion", "creationTimestamp", "managedFields", "ownerReferences", "selfLink"]:
+            meta.pop(k, None)
+        pod["metadata"] = meta
+        
+        # 2. Strip the status field to prevent state conflicts
+        pod.pop("status", None)
 
-        # Apply new memory limits to all containers
-        for container in data["spec"]["containers"]:
+        # 3. Apply the massive 1.5Gi memory limit to ALL containers
+        for container in pod["spec"]["containers"]:
             container["resources"] = {
                 "limits": {"memory": "{{ new_memory_limit }}"},
                 "requests": {"memory": "{{ new_memory_limit }}"}
             }
         
-        with open("/tmp/patched_pod.json", "w") as f:
-            json.dump(data, f)
+        with open("/tmp/remediate_pod.json", "w") as f:
+            json.dump(pod, f)
         '
+      args:
+        chdir: /home/akshay
 
-    - name: Delete existing pod (Force)
+    - name: Force Delete failing pod (Immediate Eviction)
       ansible.builtin.shell: |
         kubectl delete pod {{ target_pod_name }} -n {{ target_namespace }} --force --grace-period=0
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
         PATH: "/usr/local/bin:/usr/bin:/bin"
 
-    - name: Recreate pod from patched spec
+    - name: Recreate Pod with New Limits
       ansible.builtin.shell: |
-        kubectl create -f /tmp/patched_pod.json
+        kubectl create -f /tmp/remediate_pod.json
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
         PATH: "/usr/local/bin:/usr/bin:/bin"
+
+    - name: Wait for Pod to stabilize
+      ansible.builtin.shell: |
+        kubectl get pod {{ target_pod_name }} -n {{ target_namespace }}
+      register: pod_status
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      delay: 5
+      retries: 3
+      until: "'Running' in pod_status.stdout"
