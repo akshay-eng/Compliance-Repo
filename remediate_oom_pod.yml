@@ -1,15 +1,14 @@
 ---
 - name: Remediate Bare Pod OOM as Akshay
   hosts: all
-  # This tells AWX: "Log in as root (via the credential), then switch to akshay"
   become: yes
   become_user: akshay
   gather_facts: false
   vars:
-    target_pod_name: ""
-    target_namespace: ""
+    target_pod_name: "oom-test-pod"
+    target_namespace: "demo"
+    # Increasing this to a safer threshold for the memory-hog container
     new_memory_limit: "512Mi"
-    # Explicitly point to akshay's kubeconfig
     kubeconfig_path: "/home/akshay/.kube/config"
 
   tasks:
@@ -17,11 +16,11 @@
       ansible.builtin.shell: |
         kubectl get pod {{ target_pod_name }} -n {{ target_namespace }} -o json > /tmp/{{ target_pod_name }}_original.json
       args:
-        chdir: /home/akshay  # This acts like your 'cd /home/akshay'
+        chdir: /home/akshay
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
 
-    - name: Modify JSON (Strip immutable fields and update memory limits)
+    - name: Modify JSON (Strip immutable fields and set memory to 512Mi)
       ansible.builtin.shell: |
         python3 -c '
         import json, sys
@@ -29,27 +28,18 @@
         with open("/tmp/{{ target_pod_name }}_original.json", "r") as f:
             pod = json.load(f)
         
-        # 1. Clean immutable metadata
         metadata = pod.get("metadata", {})
         keys_to_remove = ["creationTimestamp", "resourceVersion", "uid", "managedFields", "ownerReferences"]
         for k in keys_to_remove:
             metadata.pop(k, None)
         pod["metadata"] = metadata
-        
-        # 2. Clean status
         pod.pop("status", None)
         
-        # 3. Update memory limits
         for container in pod.get("spec", {}).get("containers", []):
-            if "resources" not in container:
-                container["resources"] = {}
-            if "limits" not in container["resources"]:
-                container["resources"]["limits"] = {}
-            if "requests" not in container["resources"]:
-                container["resources"]["requests"] = {}
-                
-            container["resources"]["limits"]["memory"] = sys.argv[1]
-            container["resources"]["requests"]["memory"] = sys.argv[1]
+            container["resources"] = {
+                "limits": {"memory": sys.argv[1]},
+                "requests": {"memory": sys.argv[1]}
+            }
             
         with open("/tmp/{{ target_pod_name }}_patched.json", "w") as f:
             json.dump(pod, f)
@@ -65,18 +55,10 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
 
-    - name: Recreate the pod with increased memory
+    - name: Recreate the pod with 512Mi memory
       ansible.builtin.shell: |
         kubectl create -f /tmp/{{ target_pod_name }}_patched.json
       args:
         chdir: /home/akshay
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
-
-    - name: Clean up temp files
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - "/tmp/{{ target_pod_name }}_original.json"
-        - "/tmp/{{ target_pod_name }}_patched.json"
