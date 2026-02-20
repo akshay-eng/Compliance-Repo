@@ -1,32 +1,30 @@
 ---
-- name: Remediate Bare Pod OOM (CrashLoopBackOff)
-  hosts: localhost
-  connection: local
+- name: Remediate Bare Pod OOM via SSH and Kubectl
+  hosts: all  # In AWX, you will map this to your K8s Master Node inventory
+  become: yes # Optional: Change to 'no' if the SSH user already has kubectl permissions
   gather_facts: false
   vars:
     # These will be passed in from the AI Agent via AWX extra_vars
     target_pod_name: ""
     target_namespace: ""
     new_memory_limit: "512Mi"
+    # Update this if your kubectl config is in a different location for the SSH user
+    kubeconfig_path: "~/.kube/config" 
 
   tasks:
-    - name: Fetch existing pod configuration
-      kubernetes.core.k8s_info:
-        kind: Pod
-        name: "{{ target_pod_name }}"
-        namespace: "{{ target_namespace }}"
-      register: pod_info
+    - name: Dump current pod configuration to JSON
+      ansible.builtin.shell: |
+        kubectl get pod {{ target_pod_name }} -n {{ target_namespace }} -o json > /tmp/{{ target_pod_name }}_original.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
 
-    - name: Fail if pod does not exist
-      fail:
-        msg: "Pod {{ target_pod_name }} not found in {{ target_namespace }}."
-      when: pod_info.resources | length == 0
-
-    - name: Modify Pod Definition (Strip immutables and increase memory)
+    - name: Modify JSON (Strip immutable fields and update memory limits)
       ansible.builtin.shell: |
         python3 -c '
         import json, sys
-        pod = json.loads(sys.argv[1])
+
+        with open("/tmp/{{ target_pod_name }}_original.json", "r") as f:
+            pod = json.load(f)
         
         # 1. Clean immutable metadata
         metadata = pod.get("metadata", {})
@@ -35,10 +33,10 @@
             metadata.pop(k, None)
         pod["metadata"] = metadata
         
-        # 2. Clean status (prevents recreation conflicts)
+        # 2. Clean status
         pod.pop("status", None)
         
-        # 3. Update memory limits for all containers
+        # 3. Update memory limits
         for container in pod.get("spec", {}).get("containers", []):
             if "resources" not in container:
                 container["resources"] = {}
@@ -47,28 +45,29 @@
             if "requests" not in container["resources"]:
                 container["resources"]["requests"] = {}
                 
-            container["resources"]["limits"]["memory"] = sys.argv[2]
-            container["resources"]["requests"]["memory"] = sys.argv[2]
+            container["resources"]["limits"]["memory"] = sys.argv[1]
+            container["resources"]["requests"]["memory"] = sys.argv[1]
             
-        print(json.dumps(pod))
-        ' '{{ pod_info.resources[0] | to_json }}' '{{ new_memory_limit }}' > /tmp/patched_pod.json
-      register: python_script
+        with open("/tmp/{{ target_pod_name }}_patched.json", "w") as f:
+            json.dump(pod, f)
+        ' '{{ new_memory_limit }}'
 
-    - name: Delete the failing bare pod
-      kubernetes.core.k8s:
-        state: absent
-        kind: Pod
-        name: "{{ target_pod_name }}"
-        namespace: "{{ target_namespace }}"
-        wait: yes
-        wait_timeout: 60
+    - name: Force delete the failing bare pod
+      ansible.builtin.shell: |
+        kubectl delete pod {{ target_pod_name }} -n {{ target_namespace }} --grace-period=0 --force
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
 
     - name: Recreate the pod with increased memory
-      kubernetes.core.k8s:
-        state: present
-        src: /tmp/patched_pod.json
+      ansible.builtin.shell: |
+        kubectl create -f /tmp/{{ target_pod_name }}_patched.json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
 
     - name: Clean up temp files
       ansible.builtin.file:
-        path: /tmp/patched_pod.json
+        path: "{{ item }}"
         state: absent
+      loop:
+        - "/tmp/{{ target_pod_name }}_original.json"
+        - "/tmp/{{ target_pod_name }}_patched.json"
