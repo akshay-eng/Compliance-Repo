@@ -1,64 +1,67 @@
 ---
-- name: Remediate Bare Pod OOM as Akshay
+- name: Remediate Bare Pod OOM (High Reliability)
   hosts: all
   become: yes
+  # Log in as root, then switch to akshay
   become_user: akshay
   gather_facts: false
   vars:
     target_pod_name: "oom-test-pod"
     target_namespace: "demo"
-    # Increasing this to a safer threshold for the memory-hog container
     new_memory_limit: "512Mi"
     kubeconfig_path: "/home/akshay/.kube/config"
 
   tasks:
-    - name: Dump current pod configuration to JSON
+    - name: Ensure stale temp files are removed
+      ansible.builtin.file:
+        path: "/tmp/{{ item }}"
+        state: absent
+      loop:
+        - "original_pod.json"
+        - "patched_pod.json"
+
+    - name: Get current pod spec
       ansible.builtin.shell: |
-        kubectl get pod {{ target_pod_name }} -n {{ target_namespace }} -o json > /tmp/{{ target_pod_name }}_original.json
-      args:
-        chdir: /home/akshay
+        kubectl get pod {{ target_pod_name }} -n {{ target_namespace }} -o json > /tmp/original_pod.json
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+        PATH: "/usr/local/bin:/usr/bin:/bin:/home/akshay/bin"
 
-    - name: Modify JSON (Strip immutable fields and set memory to 512Mi)
+    - name: Patch JSON using Python3
       ansible.builtin.shell: |
         python3 -c '
         import json, sys
+        with open("/tmp/original_pod.json", "r") as f:
+            data = json.load(f)
+        
+        # Strip internal K8s metadata
+        meta = data.get("metadata", {})
+        for key in ["uid", "resourceVersion", "creationTimestamp", "managedFields", "ownerReferences"]:
+            meta.pop(key, None)
+        data["metadata"] = meta
+        data.pop("status", None)
 
-        with open("/tmp/{{ target_pod_name }}_original.json", "r") as f:
-            pod = json.load(f)
-        
-        metadata = pod.get("metadata", {})
-        keys_to_remove = ["creationTimestamp", "resourceVersion", "uid", "managedFields", "ownerReferences"]
-        for k in keys_to_remove:
-            metadata.pop(k, None)
-        pod["metadata"] = metadata
-        pod.pop("status", None)
-        
-        for container in pod.get("spec", {}).get("containers", []):
+        # Apply new memory limits to all containers
+        for container in data["spec"]["containers"]:
             container["resources"] = {
-                "limits": {"memory": sys.argv[1]},
-                "requests": {"memory": sys.argv[1]}
+                "limits": {"memory": "{{ new_memory_limit }}"},
+                "requests": {"memory": "{{ new_memory_limit }}"}
             }
-            
-        with open("/tmp/{{ target_pod_name }}_patched.json", "w") as f:
-            json.dump(pod, f)
-        ' '{{ new_memory_limit }}'
-      args:
-        chdir: /home/akshay
+        
+        with open("/tmp/patched_pod.json", "w") as f:
+            json.dump(data, f)
+        '
 
-    - name: Force delete the failing bare pod
+    - name: Delete existing pod (Force)
       ansible.builtin.shell: |
-        kubectl delete pod {{ target_pod_name }} -n {{ target_namespace }} --grace-period=0 --force
-      args:
-        chdir: /home/akshay
+        kubectl delete pod {{ target_pod_name }} -n {{ target_namespace }} --force --grace-period=0
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+        PATH: "/usr/local/bin:/usr/bin:/bin"
 
-    - name: Recreate the pod with 512Mi memory
+    - name: Recreate pod from patched spec
       ansible.builtin.shell: |
-        kubectl create -f /tmp/{{ target_pod_name }}_patched.json
-      args:
-        chdir: /home/akshay
+        kubectl create -f /tmp/patched_pod.json
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
+        PATH: "/usr/local/bin:/usr/bin:/bin"
