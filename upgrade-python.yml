@@ -1,125 +1,66 @@
 ---
-- name: Upgrade Python 3.12 to 3.13 on RHEL-based Linux VM
+- name: Upgrade Python 3.12 to 3.13 on Ubuntu VM
   hosts: all
   become: true
   become_method: sudo
   become_user: root
   vars:
-    python_new_version: "3.13"
-    python_new_full: "3.13.2"
     python_old_version: "3.12"
+    python_new_version: "3.13"
     remove_old_python: false
-    build_from_source: false   # set true if dnf install python3.13 fails
 
   tasks:
 
-    # ── Try dnf install first (works on RHEL 9.4+ / Rocky 9 / Alma 9) ──────────
-
-    - name: Install Python {{ python_new_version }} via dnf
-      dnf:
-        name: python{{ python_new_version }}
+    - name: Install prerequisites
+      apt:
+        name:
+          - software-properties-common
+          - python3-apt
+          - gpg
+          - gpg-agent
         state: present
         update_cache: true
-      register: dnf_install
-      ignore_errors: true
-      when: not build_from_source
 
-    - name: Show dnf install result
-      debug:
-        msg: "dnf install result: {{ dnf_install }}"
-      when: not build_from_source
+    - name: Add deadsnakes PPA
+      command: add-apt-repository -y ppa:deadsnakes/ppa
+      changed_when: true
 
-    # ── Build from source if dnf failed or build_from_source: true ──────────────
+    - name: Update apt cache after adding PPA
+      apt:
+        update_cache: true
 
-    - name: Install build dependencies (for source build)
-      dnf:
+    - name: Install Python {{ python_new_version }} and related packages
+      apt:
         name:
-          - gcc
-          - gcc-c++
-          - make
-          - openssl-devel
-          - bzip2-devel
-          - libffi-devel
-          - zlib-devel
-          - readline-devel
-          - sqlite-devel
-          - wget
-          - xz-devel
-          - tk-devel
-          - uuid-devel
+          - python{{ python_new_version }}
+          - python{{ python_new_version }}-venv
+          - python{{ python_new_version }}-dev
+          - python{{ python_new_version }}-distutils
         state: present
-      when: build_from_source or (dnf_install is defined and dnf_install.failed)
 
-    - name: Download Python {{ python_new_full }} source tarball
-      get_url:
-        url: "https://www.python.org/ftp/python/{{ python_new_full }}/Python-{{ python_new_full }}.tgz"
-        dest: "/tmp/Python-{{ python_new_full }}.tgz"
-        timeout: 120
-      when: build_from_source or (dnf_install is defined and dnf_install.failed)
-
-    - name: Extract Python source
-      unarchive:
-        src: "/tmp/Python-{{ python_new_full }}.tgz"
-        dest: /tmp/
-        remote_src: true
-      when: build_from_source or (dnf_install is defined and dnf_install.failed)
-
-    - name: Configure Python build
-      command: ./configure --enable-optimizations --prefix=/usr/local --altinstall
-      args:
-        chdir: "/tmp/Python-{{ python_new_full }}"
-      when: build_from_source or (dnf_install is defined and dnf_install.failed)
-
-    - name: Compile and install Python (takes 5-15 minutes)
-      command: make altinstall -j{{ ansible_processor_vcpus | default(2) }}
-      args:
-        chdir: "/tmp/Python-{{ python_new_full }}"
-      when: build_from_source or (dnf_install is defined and dnf_install.failed)
-
-    # ── Find the python3.13 binary wherever it ended up ─────────────────────────
-
-    - name: Find python3.13 binary path
-      command: which python3.13
-      register: py313_path
-      changed_when: false
-      failed_when: false
-
-    - name: Try /usr/local/bin if which failed
-      set_fact:
-        python313_bin: "{{ py313_path.stdout if py313_path.rc == 0 else '/usr/local/bin/python3.13' }}"
-
-    - name: Verify Python {{ python_new_version }} binary
-      command: "{{ python313_bin }} --version"
+    - name: Verify Python {{ python_new_version }} binary exists
+      command: python{{ python_new_version }} --version
       register: py_new_ver
       changed_when: false
 
-    - name: Show installed Python version
+    - name: Show installed version
       debug:
         msg: "Installed: {{ py_new_ver.stdout }}"
-
-    # ── Register with update-alternatives ───────────────────────────────────────
 
     - name: Register Python {{ python_new_version }} with update-alternatives (priority 313)
       command: >
         update-alternatives --install /usr/bin/python3 python3
-        {{ python313_bin }} 313
+        /usr/bin/python{{ python_new_version }} 313
       changed_when: true
-
-    - name: Find python3.12 binary path
-      command: which python3.12
-      register: py312_path
-      changed_when: false
-      failed_when: false
 
     - name: Register Python {{ python_old_version }} with update-alternatives (priority 312)
       command: >
         update-alternatives --install /usr/bin/python3 python3
-        {{ py312_path.stdout }} 312
-      when: py312_path.rc == 0
+        /usr/bin/python{{ python_old_version }} 312
       changed_when: true
 
     - name: Set Python {{ python_new_version }} as default python3
-      command: "update-alternatives --set python3 {{ python313_bin }}"
+      command: update-alternatives --set python3 /usr/bin/python{{ python_new_version }}
       changed_when: true
 
     - name: Confirm active python3 version
@@ -131,10 +72,12 @@
       debug:
         msg: "Default python3 is now: {{ py_default.stdout }}"
 
-    # ── Optional: remove old Python 3.12 ────────────────────────────────────────
-
-    - name: Remove Python {{ python_old_version }} via dnf (optional)
-      dnf:
-        name: python{{ python_old_version }}
+    - name: Remove Python {{ python_old_version }} packages (optional)
+      apt:
+        name:
+          - python{{ python_old_version }}
+          - python{{ python_old_version }}-venv
+          - python{{ python_old_version }}-dev
         state: absent
+        purge: true
       when: remove_old_python | bool
