@@ -5,7 +5,7 @@
   vars:
     python_old_version: "3.12"
     python_new_version: "3.13"
-    remove_old_python: false   # set to true in AWX extra vars if you want to uninstall 3.12
+    remove_old_python: false
 
   tasks:
 
@@ -13,7 +13,6 @@
       apt:
         name: software-properties-common
         state: present
-        update_cache: false
 
     - name: Add deadsnakes PPA
       apt_repository:
@@ -40,19 +39,17 @@
       debug:
         msg: "Installed: {{ py_new_ver.stdout }}"
 
-    - name: Register Python {{ python_new_version }} with update-alternatives
-      alternatives:
-        name: python3
-        path: /usr/bin/python{{ python_new_version }}
-        link: /usr/bin/python3
-        priority: 313
+    - name: Register Python {{ python_new_version }} with update-alternatives (priority 313)
+      command: >
+        update-alternatives --install /usr/bin/python3 python3
+        /usr/bin/python{{ python_new_version }} 313
+      changed_when: true
 
-    - name: Register Python {{ python_old_version }} with update-alternatives (lower priority)
-      alternatives:
-        name: python3
-        path: /usr/bin/python{{ python_old_version }}
-        link: /usr/bin/python3
-        priority: 312
+    - name: Register Python {{ python_old_version }} with update-alternatives (priority 312)
+      command: >
+        update-alternatives --install /usr/bin/python3 python3
+        /usr/bin/python{{ python_old_version }} 312
+      changed_when: true
 
     - name: Set Python {{ python_new_version }} as default python3
       command: update-alternatives --set python3 /usr/bin/python{{ python_new_version }}
