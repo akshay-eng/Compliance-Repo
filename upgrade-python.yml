@@ -4,91 +4,51 @@
   become: true
   become_method: sudo
   become_user: root
-  vars:
-    python_old_version: "3.12"
-    python_new_version: "3.13"
-    remove_old_python: false
+  gather_facts: false
 
   tasks:
 
-    - name: Install software-properties-common only
-      apt:
-        name: software-properties-common
-        state: present
-        update_cache: true
-
-    - name: Remove conflicting deadsnakes PPA source files
+    - name: Fix conflicting PPA and install Python 3.13
       shell: |
-        rm -f /etc/apt/sources.list.d/deadsnakes-ubuntu-ppa-*.list
-        rm -f /etc/apt/sources.list.d/deadsnakes-ubuntu-ppa-*.sources
+        set -e
+
+        echo ">>> Removing conflicting deadsnakes PPA files..."
         rm -f /etc/apt/sources.list.d/deadsnakes*.list
         rm -f /etc/apt/sources.list.d/deadsnakes*.sources
-      changed_when: true
-
-    - name: Remove old deadsnakes GPG keys
-      shell: |
         rm -f /etc/apt/trusted.gpg.d/deadsnakes*
         rm -f /usr/share/keyrings/deadsnakes*
-      changed_when: true
-      failed_when: false
 
-    - name: Re-add deadsnakes PPA cleanly
-      command: add-apt-repository -y ppa:deadsnakes/ppa
-      changed_when: true
+        echo ">>> Running apt-get update..."
+        apt-get update -y
 
-    - name: Update apt cache
-      apt:
-        update_cache: true
+        echo ">>> Installing software-properties-common..."
+        apt-get install -y software-properties-common
 
-    - name: Install Python {{ python_new_version }} and related packages
-      apt:
-        name:
-          - python{{ python_new_version }}
-          - python{{ python_new_version }}-venv
-          - python{{ python_new_version }}-dev
-          - python{{ python_new_version }}-distutils
-        state: present
+        echo ">>> Re-adding deadsnakes PPA..."
+        add-apt-repository -y ppa:deadsnakes/ppa
 
-    - name: Verify Python {{ python_new_version }} binary exists
-      command: python{{ python_new_version }} --version
-      register: py_new_ver
-      changed_when: false
+        echo ">>> Updating apt cache after PPA add..."
+        apt-get update -y
 
-    - name: Show installed version
-      debug:
-        msg: "Installed: {{ py_new_ver.stdout }}"
+        echo ">>> Installing Python 3.13..."
+        apt-get install -y python3.13 python3.13-venv python3.13-dev python3.13-distutils
 
-    - name: Register Python {{ python_new_version }} with update-alternatives (priority 313)
-      command: >
-        update-alternatives --install /usr/bin/python3 python3
-        /usr/bin/python{{ python_new_version }} 313
+        echo ">>> Done installing."
       changed_when: true
 
-    - name: Register Python {{ python_old_version }} with update-alternatives (priority 312)
-      command: >
-        update-alternatives --install /usr/bin/python3 python3
-        /usr/bin/python{{ python_old_version }} 312
+    - name: Register Python versions with update-alternatives
+      shell: |
+        set -e
+        update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 313
+        update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 312
+        update-alternatives --set python3 /usr/bin/python3.13
       changed_when: true
 
-    - name: Set Python {{ python_new_version }} as default python3
-      command: update-alternatives --set python3 /usr/bin/python{{ python_new_version }}
-      changed_when: true
-
-    - name: Confirm active python3 version
+    - name: Confirm Python 3.13 is now default
       command: python3 --version
-      register: py_default
+      register: py_result
       changed_when: false
 
-    - name: Show active default
+    - name: Show result
       debug:
-        msg: "Default python3 is now: {{ py_default.stdout }}"
-
-    - name: Remove Python {{ python_old_version }} packages (optional)
-      apt:
-        name:
-          - python{{ python_old_version }}
-          - python{{ python_old_version }}-venv
-          - python{{ python_old_version }}-dev
-        state: absent
-        purge: true
-      when: remove_old_python | bool
+        msg: "Active default: {{ py_result.stdout }}"
