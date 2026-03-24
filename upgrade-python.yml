@@ -11,21 +11,32 @@
 
   tasks:
 
-    - name: Install prerequisites
+    - name: Install software-properties-common only
       apt:
-        name:
-          - software-properties-common
-          - python3-apt
-          - gpg
-          - gpg-agent
+        name: software-properties-common
         state: present
         update_cache: true
 
-    - name: Add deadsnakes PPA
+    - name: Remove conflicting deadsnakes PPA source files
+      shell: |
+        rm -f /etc/apt/sources.list.d/deadsnakes-ubuntu-ppa-*.list
+        rm -f /etc/apt/sources.list.d/deadsnakes-ubuntu-ppa-*.sources
+        rm -f /etc/apt/sources.list.d/deadsnakes*.list
+        rm -f /etc/apt/sources.list.d/deadsnakes*.sources
+      changed_when: true
+
+    - name: Remove old deadsnakes GPG keys
+      shell: |
+        rm -f /etc/apt/trusted.gpg.d/deadsnakes*
+        rm -f /usr/share/keyrings/deadsnakes*
+      changed_when: true
+      failed_when: false
+
+    - name: Re-add deadsnakes PPA cleanly
       command: add-apt-repository -y ppa:deadsnakes/ppa
       changed_when: true
 
-    - name: Update apt cache after adding PPA
+    - name: Update apt cache
       apt:
         update_cache: true
 
