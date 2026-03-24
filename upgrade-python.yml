@@ -1,0 +1,78 @@
+---
+- name: Upgrade Python 3.12 to 3.13 on Linux VM
+  hosts: all
+  become: true
+  vars:
+    python_old_version: "3.12"
+    python_new_version: "3.13"
+    remove_old_python: false   # set to true in AWX extra vars if you want to uninstall 3.12
+
+  tasks:
+
+    - name: Ensure software-properties-common is installed
+      apt:
+        name: software-properties-common
+        state: present
+        update_cache: false
+
+    - name: Add deadsnakes PPA
+      apt_repository:
+        repo: ppa:deadsnakes/ppa
+        state: present
+        update_cache: true
+
+    - name: Install Python {{ python_new_version }} and related packages
+      apt:
+        name:
+          - python{{ python_new_version }}
+          - python{{ python_new_version }}-venv
+          - python{{ python_new_version }}-dev
+          - python{{ python_new_version }}-distutils
+        state: present
+        update_cache: true
+
+    - name: Verify Python {{ python_new_version }} binary exists
+      command: python{{ python_new_version }} --version
+      register: py_new_ver
+      changed_when: false
+
+    - name: Show installed version
+      debug:
+        msg: "Installed: {{ py_new_ver.stdout }}"
+
+    - name: Register Python {{ python_new_version }} with update-alternatives
+      alternatives:
+        name: python3
+        path: /usr/bin/python{{ python_new_version }}
+        link: /usr/bin/python3
+        priority: 313
+
+    - name: Register Python {{ python_old_version }} with update-alternatives (lower priority)
+      alternatives:
+        name: python3
+        path: /usr/bin/python{{ python_old_version }}
+        link: /usr/bin/python3
+        priority: 312
+
+    - name: Set Python {{ python_new_version }} as default python3
+      command: update-alternatives --set python3 /usr/bin/python{{ python_new_version }}
+      changed_when: true
+
+    - name: Confirm active python3 version
+      command: python3 --version
+      register: py_default
+      changed_when: false
+
+    - name: Show active default
+      debug:
+        msg: "Default python3 is now: {{ py_default.stdout }}"
+
+    - name: Remove Python {{ python_old_version }} packages (optional)
+      apt:
+        name:
+          - python{{ python_old_version }}
+          - python{{ python_old_version }}-venv
+          - python{{ python_old_version }}-dev
+        state: absent
+        purge: true
+      when: remove_old_python | bool
