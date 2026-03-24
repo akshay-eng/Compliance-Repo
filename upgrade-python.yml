@@ -31,7 +31,7 @@
         apt-get update -y
 
         echo ">>> Installing Python 3.13..."
-        apt-get install -y python3.13 python3.13-venv python3.13-dev python3.13-distutils
+        apt-get install -y python3.13 python3.13-venv python3.13-dev
 
         echo ">>> Done installing."
       changed_when: true
