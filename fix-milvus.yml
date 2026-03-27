@@ -1,0 +1,153 @@
+---
+# =============================================================================
+# Quest MLOps — Milvus Vector DB Remediation Playbook
+#
+# Login flow:
+#   1. SSH in as akshay (key-based)
+#   2. sudo su - akshay  (become root via sudo, password: Wipro@123)
+#   3. cd /home/akshay
+#   4. docker ps  (verify container list)
+#   5. docker start milvus-standalone  (if not running)
+#   6. Verify health at localhost:9091/healthz
+#
+# WXO Agent invokes this via AWX Tower job template.
+# =============================================================================
+
+- name: Fix Milvus Vector DB on IBM Cloud Inference VM
+  hosts: ibm_vm
+  gather_facts: false
+
+  # Ansible SSHs as akshay, then uses sudo (password Wipro@123) for docker commands
+  become: true
+  become_method: sudo
+  become_user: root
+
+  vars:
+    milvus_container_name: milvus-standalone
+    milvus_home_dir:       /home/akshay
+    milvus_health_url:     "http://localhost:9091/healthz"
+    health_retries:        12
+    health_delay:          5
+
+  tasks:
+
+    # ── 1. Verify SSH connectivity ───────────────────────────────────────────
+    - name: Ping VM to verify SSH connectivity
+      ansible.builtin.ping:
+      become: false   # ping doesn't need root
+
+    # ── 2. Show who we are after privilege escalation ────────────────────────
+    - name: Confirm effective user (should be root after sudo su)
+      ansible.builtin.command: whoami
+      register: whoami_result
+      changed_when: false
+
+    - name: Show effective user
+      ansible.builtin.debug:
+        msg: "Running as: {{ whoami_result.stdout }}"
+
+    # ── 3. Move to akshay's home directory ───────────────────────────────────
+    - name: Confirm /home/akshay exists and is accessible
+      ansible.builtin.stat:
+        path: "{{ milvus_home_dir }}"
+      register: home_dir
+
+    - name: Fail if home directory not found
+      ansible.builtin.fail:
+        msg: "{{ milvus_home_dir }} does not exist on the VM"
+      when: not home_dir.stat.exists
+
+    # ── 4. docker ps — show all containers to confirm environment ────────────
+    - name: Run docker ps to list all containers
+      ansible.builtin.command:
+        cmd: docker ps -a --format "table {{ '{{' }}.Names{{ '}}' }}\t{{ '{{' }}.Status{{ '}}' }}\t{{ '{{' }}.Image{{ '}}' }}"
+        chdir: "{{ milvus_home_dir }}"
+      register: docker_ps_output
+      changed_when: false
+
+    - name: Show docker ps output
+      ansible.builtin.debug:
+        msg: "{{ docker_ps_output.stdout_lines }}"
+
+    # ── 5. Check Milvus container state ──────────────────────────────────────
+    - name: Get Milvus container state
+      ansible.builtin.command:
+        cmd: "docker inspect --format={{ '{{' }}.State.Status{{ '}}' }} {{ milvus_container_name }}"
+        chdir: "{{ milvus_home_dir }}"
+      register: milvus_state
+      changed_when: false
+      failed_when: false   # container may be stopped (non-zero exit is fine)
+
+    - name: Show Milvus container state
+      ansible.builtin.debug:
+        msg: "Milvus container state: {{ milvus_state.stdout | default('NOT FOUND') }}"
+
+    # ── 6. Start Milvus if it is not running ─────────────────────────────────
+    - name: Start milvus-standalone container
+      ansible.builtin.command:
+        cmd: "docker start {{ milvus_container_name }}"
+        chdir: "{{ milvus_home_dir }}"
+      when: milvus_state.stdout | default('') != 'running'
+      register: start_result
+
+    - name: Show docker start output
+      ansible.builtin.debug:
+        msg: "docker start: {{ start_result.stdout | default('(already running, skipped)') }}"
+      when: start_result is not skipped
+
+    # ── 7. docker ps again — confirm milvus is now Up ────────────────────────
+    - name: Confirm milvus-standalone is now running
+      ansible.builtin.command:
+        cmd: "docker ps --filter name={{ milvus_container_name }} --format '{{ '{{' }}.Names{{ '}}' }}: {{ '{{' }}.Status{{ '}}' }}'"
+        chdir: "{{ milvus_home_dir }}"
+      register: post_start_ps
+      changed_when: false
+
+    - name: Show post-start status
+      ansible.builtin.debug:
+        msg: "{{ post_start_ps.stdout }}"
+
+    # ── 8. Wait for Milvus health endpoint ───────────────────────────────────
+    - name: Wait for Milvus health endpoint (localhost:9091/healthz)
+      ansible.builtin.uri:
+        url: "{{ milvus_health_url }}"
+        method: GET
+        status_code: 200
+        timeout: 5
+      register: health_check
+      retries: "{{ health_retries }}"
+      delay: "{{ health_delay }}"
+      until: health_check.status == 200
+
+    - name: Milvus health confirmed
+      ansible.builtin.debug:
+        msg: "✅ Milvus is healthy (HTTP {{ health_check.status }}) — ready for model deployment"
+
+    # ── 9. Write remediation log ──────────────────────────────────────────────
+    - name: Write remediation log to /home/akshay/quest/logs/
+      ansible.builtin.shell: |
+        mkdir -p {{ milvus_home_dir }}/quest/logs
+        echo "{
+          \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+          \"action\": \"milvus_restart\",
+          \"container\": \"{{ milvus_container_name }}\",
+          \"triggered_by\": \"WINGS_AWX_agent\",
+          \"result\": \"healthy\"
+        }" >> {{ milvus_home_dir }}/quest/logs/remediation.log
+      args:
+        chdir: "{{ milvus_home_dir }}"
+      changed_when: true
+
+    # ── 10. Final summary ─────────────────────────────────────────────────────
+    - name: Remediation complete
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+           WINGS Remediation Complete
+          ============================================================
+           Container : {{ milvus_container_name }}
+           Home dir  : {{ milvus_home_dir }}
+           Health URL: {{ milvus_health_url }}
+           Status    : HEALTHY ✅
+           Next step : Re-trigger GitHub Actions workflow
+          ============================================================
