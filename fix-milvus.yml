@@ -1,117 +1,74 @@
 ---
-# =============================================================================
 # Quest MLOps — Milvus Vector DB Remediation Playbook
-#
-# Login flow (matches manual steps):
-#   1. SSH in as root (private key — no password)
-#   2. su - akshay  (password: Wipro@123)
-#   3. cd /home/akshay
-#   4. sudo docker ps
-#   5. sudo docker start milvus-standalone
-#   6. Verify health at localhost:9091/healthz
-#
-# AWX Credential: Username=root, SSH Private Key only. No privilege escalation.
-# User switching is done explicitly inside this playbook.
-# =============================================================================
+# SSH as root (key) → su - akshay (no password needed from root) → sudo docker
 
 - name: Fix Milvus Vector DB on IBM Cloud Inference VM
   hosts: all
   gather_facts: false
-  become: false    # we SSH as root — no become needed at play level
+  become: false
 
   vars:
     milvus_container_name: milvus-standalone
-    milvus_home_dir:       /home/akshay
-    milvus_health_url:     "http://localhost:9091/healthz"
-    akshay_password:       "Wipro@123"
-    health_retries:        12
-    health_delay:          5
+    milvus_home_dir: /home/akshay
+    milvus_health_url: "http://localhost:9091/healthz"
+    akshay_password: "Wipro@123"
+    health_retries: 12
+    health_delay: 5
 
   tasks:
 
-    # ── 1. Verify SSH connectivity (as root) ─────────────────────────────────
-    - name: Ping VM — confirm SSH as root works
-      ansible.builtin.ping:
-
-    - name: Confirm we are root
+    - name: Confirm SSH login user
       ansible.builtin.command: whoami
       register: whoami_out
       changed_when: false
 
     - name: Show login user
       ansible.builtin.debug:
-        msg: "SSH login user: {{ whoami_out.stdout }}"
+        msg: "Logged in as: {{ whoami_out.stdout }}"
 
-    # ── 2. Switch to akshay and show docker ps ───────────────────────────────
-    - name: "su - akshay → docker ps (show all containers)"
+    - name: "su - akshay → docker ps (list all containers)"
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          cd {{ milvus_home_dir }}
-          sudo -S docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
+        su - akshay -c "echo {{ akshay_password }} | sudo -S docker ps -a"
       register: docker_ps_out
       changed_when: false
-      no_log: true    # hide password from logs
+      no_log: true
 
     - name: Show docker ps output
       ansible.builtin.debug:
         msg: "{{ docker_ps_out.stdout_lines }}"
 
-    # ── 3. Check Milvus container state ──────────────────────────────────────
-    - name: "su - akshay → docker inspect milvus-standalone"
+    - name: "su - akshay → check if milvus-standalone is running"
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          sudo -S docker inspect --format='{{ '{{' }}.State.Status{{ '}}' }}' {{ milvus_container_name }}
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
-      register: milvus_state
+        su - akshay -c "echo {{ akshay_password }} | sudo -S docker ps --filter name={{ milvus_container_name }} --filter status=running" | grep -c {{ milvus_container_name }} || true
+      register: milvus_running
       changed_when: false
-      failed_when: false
-      no_log: true
 
-    - name: Show Milvus container state
+    - name: Show Milvus running status
       ansible.builtin.debug:
-        msg: "milvus-standalone state: {{ milvus_state.stdout | default('NOT FOUND') }}"
+        msg: "Milvus running count: {{ milvus_running.stdout | trim }} (0 = stopped)"
 
-    # ── 4. Start Milvus if not running ───────────────────────────────────────
     - name: "su - akshay → sudo docker start milvus-standalone"
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          cd {{ milvus_home_dir }}
-          echo '{{ akshay_password }}' | sudo -S docker start {{ milvus_container_name }}
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
+        su - akshay -c "echo {{ akshay_password }} | sudo -S docker start {{ milvus_container_name }}"
       register: start_out
-      when: milvus_state.stdout | default('') | trim != 'running'
-      no_log: true
+      when: milvus_running.stdout | trim == "0"
 
     - name: Show docker start result
       ansible.builtin.debug:
-        msg: "docker start output: {{ start_out.stdout | default('(already running — skipped)') }}"
+        msg: "docker start: {{ start_out.stdout | default('already running — skipped') }}"
       when: start_out is not skipped
 
-    # ── 5. Confirm it is now Up ───────────────────────────────────────────────
     - name: "su - akshay → docker ps (confirm milvus is Up)"
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          sudo -S docker ps --filter name={{ milvus_container_name }} \
-            --format '{{.Names}}: {{.Status}}'
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
+        su - akshay -c "echo {{ akshay_password }} | sudo -S docker ps --filter name={{ milvus_container_name }}"
       register: post_start_ps
       changed_when: false
       no_log: true
 
-    - name: Show post-start container status
+    - name: Show post-start status
       ansible.builtin.debug:
-        msg: "{{ post_start_ps.stdout }}"
+        msg: "{{ post_start_ps.stdout_lines }}"
 
-    # ── 6. Wait for Milvus health endpoint ───────────────────────────────────
     - name: Wait for Milvus health endpoint (localhost:9091/healthz)
       ansible.builtin.uri:
         url: "{{ milvus_health_url }}"
@@ -125,154 +82,90 @@
 
     - name: Milvus health confirmed
       ansible.builtin.debug:
-        msg: "✅ Milvus is healthy (HTTP {{ health_check.status }}) — ready for model deployment"
+        msg: "Milvus is healthy (HTTP {{ health_check.status }}) — ready for model deployment"
 
-    # ── 7. Write remediation log as akshay ───────────────────────────────────
-    - name: Write remediation log to /home/akshay/quest/logs/
+    - name: Write remediation log
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          mkdir -p {{ milvus_home_dir }}/quest/logs
-          echo '{
-            \"timestamp\": \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",
-            \"action\": \"milvus_restart\",
-            \"container\": \"{{ milvus_container_name }}\",
-            \"triggered_by\": \"WINGS_AWX_agent\",
-            \"result\": \"healthy\"
-          }' >> {{ milvus_home_dir }}/quest/logs/remediation.log
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
+        su - akshay -c "
+          mkdir -p {{ milvus_home_dir }}/quest/logs &&
+          echo '{\"timestamp\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",\"action\":\"milvus_restart\",\"triggered_by\":\"WINGS_AWX\",\"result\":\"healthy\"}' >> {{ milvus_home_dir }}/quest/logs/remediation.log
+        "
       changed_when: true
-      no_log: true
 
-    # ── 8. Final summary ──────────────────────────────────────────────────────
     - name: Remediation complete
       ansible.builtin.debug:
-        msg: |
-          ============================================================
-           WINGS Remediation Complete
-          ============================================================
-           SSH user  : root → su - akshay
-           Home dir  : {{ milvus_home_dir }}
-           Container : {{ milvus_container_name }}
-           Health URL: {{ milvus_health_url }}
-           Status    : HEALTHY ✅
-           Next step : Re-trigger GitHub Actions workflow
-          ============================================================
+        msg: "WINGS Remediation Complete — Container: {{ milvus_container_name }} — Status: HEALTHY — Next: Re-trigger GitHub Actions"
 ---
-# =============================================================================
 # Quest MLOps — Milvus Vector DB Remediation Playbook
-#
-# Login flow (matches manual steps):
-#   1. SSH in as root (private key — no password)
-#   2. su - akshay  (password: Wipro@123)
-#   3. cd /home/akshay
-#   4. sudo docker ps
-#   5. sudo docker start milvus-standalone
-#   6. Verify health at localhost:9091/healthz
-#
-# AWX Credential: Username=root, SSH Private Key only. No privilege escalation.
-# User switching is done explicitly inside this playbook.
-# =============================================================================
+# SSH as root (key) → su - akshay (no password needed from root) → sudo docker
 
 - name: Fix Milvus Vector DB on IBM Cloud Inference VM
   hosts: all
   gather_facts: false
-  become: false    # we SSH as root — no become needed at play level
+  become: false
 
   vars:
     milvus_container_name: milvus-standalone
-    milvus_home_dir:       /home/akshay
-    milvus_health_url:     "http://localhost:9091/healthz"
-    akshay_password:       "Wipro@123"
-    health_retries:        12
-    health_delay:          5
+    milvus_home_dir: /home/akshay
+    milvus_health_url: "http://localhost:9091/healthz"
+    akshay_password: "Wipro@123"
+    health_retries: 12
+    health_delay: 5
 
   tasks:
 
-    # ── 1. Verify SSH connectivity (as root) ─────────────────────────────────
-    - name: Ping VM — confirm SSH as root works
-      ansible.builtin.ping:
-
-    - name: Confirm we are root
+    - name: Confirm SSH login user
       ansible.builtin.command: whoami
       register: whoami_out
       changed_when: false
 
     - name: Show login user
       ansible.builtin.debug:
-        msg: "SSH login user: {{ whoami_out.stdout }}"
+        msg: "Logged in as: {{ whoami_out.stdout }}"
 
-    # ── 2. Switch to akshay and show docker ps ───────────────────────────────
-    - name: "su - akshay → docker ps (show all containers)"
+    - name: "su - akshay → docker ps (list all containers)"
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          cd {{ milvus_home_dir }}
-          sudo -S docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
+        su - akshay -c "echo {{ akshay_password }} | sudo -S docker ps -a"
       register: docker_ps_out
       changed_when: false
-      no_log: true    # hide password from logs
+      no_log: true
 
     - name: Show docker ps output
       ansible.builtin.debug:
         msg: "{{ docker_ps_out.stdout_lines }}"
 
-    # ── 3. Check Milvus container state ──────────────────────────────────────
-    - name: "su - akshay → docker inspect milvus-standalone"
+    - name: "su - akshay → check if milvus-standalone is running"
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          sudo -S docker inspect --format='{{ '{{' }}.State.Status{{ '}}' }}' {{ milvus_container_name }}
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
-      register: milvus_state
+        su - akshay -c "echo {{ akshay_password }} | sudo -S docker ps --filter name={{ milvus_container_name }} --filter status=running" | grep -c {{ milvus_container_name }} || true
+      register: milvus_running
       changed_when: false
-      failed_when: false
-      no_log: true
 
-    - name: Show Milvus container state
+    - name: Show Milvus running status
       ansible.builtin.debug:
-        msg: "milvus-standalone state: {{ milvus_state.stdout | default('NOT FOUND') }}"
+        msg: "Milvus running count: {{ milvus_running.stdout | trim }} (0 = stopped)"
 
-    # ── 4. Start Milvus if not running ───────────────────────────────────────
     - name: "su - akshay → sudo docker start milvus-standalone"
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          cd {{ milvus_home_dir }}
-          echo '{{ akshay_password }}' | sudo -S docker start {{ milvus_container_name }}
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
+        su - akshay -c "echo {{ akshay_password }} | sudo -S docker start {{ milvus_container_name }}"
       register: start_out
-      when: milvus_state.stdout | default('') | trim != 'running'
-      no_log: true
+      when: milvus_running.stdout | trim == "0"
 
     - name: Show docker start result
       ansible.builtin.debug:
-        msg: "docker start output: {{ start_out.stdout | default('(already running — skipped)') }}"
+        msg: "docker start: {{ start_out.stdout | default('already running — skipped') }}"
       when: start_out is not skipped
 
-    # ── 5. Confirm it is now Up ───────────────────────────────────────────────
     - name: "su - akshay → docker ps (confirm milvus is Up)"
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          sudo -S docker ps --filter name={{ milvus_container_name }} \
-            --format '{{.Names}}: {{.Status}}'
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
+        su - akshay -c "echo {{ akshay_password }} | sudo -S docker ps --filter name={{ milvus_container_name }}"
       register: post_start_ps
       changed_when: false
       no_log: true
 
-    - name: Show post-start container status
+    - name: Show post-start status
       ansible.builtin.debug:
-        msg: "{{ post_start_ps.stdout }}"
+        msg: "{{ post_start_ps.stdout_lines }}"
 
-    # ── 6. Wait for Milvus health endpoint ───────────────────────────────────
     - name: Wait for Milvus health endpoint (localhost:9091/healthz)
       ansible.builtin.uri:
         url: "{{ milvus_health_url }}"
@@ -286,37 +179,16 @@
 
     - name: Milvus health confirmed
       ansible.builtin.debug:
-        msg: "✅ Milvus is healthy (HTTP {{ health_check.status }}) — ready for model deployment"
+        msg: "Milvus is healthy (HTTP {{ health_check.status }}) — ready for model deployment"
 
-    # ── 7. Write remediation log as akshay ───────────────────────────────────
-    - name: Write remediation log to /home/akshay/quest/logs/
+    - name: Write remediation log
       ansible.builtin.shell: |
-        echo "{{ akshay_password }}" | su - akshay -c "
-          mkdir -p {{ milvus_home_dir }}/quest/logs
-          echo '{
-            \"timestamp\": \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",
-            \"action\": \"milvus_restart\",
-            \"container\": \"{{ milvus_container_name }}\",
-            \"triggered_by\": \"WINGS_AWX_agent\",
-            \"result\": \"healthy\"
-          }' >> {{ milvus_home_dir }}/quest/logs/remediation.log
-        " << 'SUDOEOF'
-        {{ akshay_password }}
-        SUDOEOF
+        su - akshay -c "
+          mkdir -p {{ milvus_home_dir }}/quest/logs &&
+          echo '{\"timestamp\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",\"action\":\"milvus_restart\",\"triggered_by\":\"WINGS_AWX\",\"result\":\"healthy\"}' >> {{ milvus_home_dir }}/quest/logs/remediation.log
+        "
       changed_when: true
-      no_log: true
 
-    # ── 8. Final summary ──────────────────────────────────────────────────────
     - name: Remediation complete
       ansible.builtin.debug:
-        msg: |
-          ============================================================
-           WINGS Remediation Complete
-          ============================================================
-           SSH user  : root → su - akshay
-           Home dir  : {{ milvus_home_dir }}
-           Container : {{ milvus_container_name }}
-           Health URL: {{ milvus_health_url }}
-           Status    : HEALTHY ✅
-           Next step : Re-trigger GitHub Actions workflow
-          ============================================================
+        msg: "WINGS Remediation Complete — Container: {{ milvus_container_name }} — Status: HEALTHY — Next: Re-trigger GitHub Actions"
